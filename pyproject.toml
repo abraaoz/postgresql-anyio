@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "postgresql-anyio"
+version = "0.5.4"
+description = "An AnyIO (asyncio or trio backend) PostgreSQL client library"
+authors = ["Abraão Zaidan <abraao.zaidan@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.13"
+anyio = "^4.8.0"
+python-dateutil = "^2.9.0"
+orjson = "^3.10.15"
+parsimonious = "^0.10.0"
+pytest = "^8.3.4"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "0.9.4"
+trio = "^0.28.0"
+
+[tool.pytest.ini_options]
+addopts = "-s"
+
+[tool.ruff]
+line-length = 100
+indent-width = 2
+
+[tool.ruff.format]
+indent-style = "space"
+
+[tool.pyright]
+pythonVersion = "3.13"
+pythonPlatform = "Linux"
+venvPath = "."
+venv = ".venv"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

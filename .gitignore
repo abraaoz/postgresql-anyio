@@ -1,8 +1,4 @@
-venv
 __pycache__
-build/
-dist/
-pganyio.egg-info/
-.secrets
-.coverage
 .DS_Store
+.ruff_cache
+.venv
