@@ -2,6 +2,7 @@ venv
 __pycache__
 build/
 dist/
-pgtrio.egg-info/
+pganyio.egg-info/
 .secrets
 .coverage
+.DS_Store

@@ -1,9 +1,9 @@
-![Unit Tests](https://github.com/elektito/pgtrio/actions/workflows/pgtrio.yml/badge.svg)
-![Coverage Badge](https://gist.githubusercontent.com/elektito/31aafc23e3119da1d39e1b9aaf5a43fd/raw/pgtrio-master-coverage.svg)
+![Unit Tests](https://github.com/elektito/pgtrio/actions/workflows/pganyio.yml/badge.svg)
+![Coverage Badge](https://gist.githubusercontent.com/elektito/31aafc23e3119da1d39e1b9aaf5a43fd/raw/pganyio-main-coverage.svg)
 
-# pgtrio
+# pganyio
 
-This is a [Trio][1]-native PostgreSQL interface library. It implements
+This is an [AnyIO][1] (asyncio or [trio][2] backend) PostgreSQL client library. It implements
 the PostgreSQL wire protocol (both text and binary) in pure Python. It
 automatically converts between common postgres/python types, and
 supports adding custom codecs for other types. Transactions, cursors,
@@ -13,36 +13,38 @@ Minimum Python version supported is 3.8.
 
 ## Usage
 
-You can install pgtrio from pypi:
+You can install pganyio from pypi:
 
-    pip install pgtrio
+    pip install pganyio
 
-To use pgtrio, you either start by calling the `connect` function or
+To use pganyio, you either start by calling the `connect` function or
 the `create_pool`. The former returns a single `Connection` object
 while the latter returns a `Pool` object that can be used to acquire
 multiple `Connection` objects.
 
 ```python3
-import trio
-import pgtrio
+import anyio
+import pganyio
 
 async def main():
-    async with pgtrio.connect('test') as conn:
+    async with pganyio.connect('test') as conn:
         results = await conn.execute('select name, dob from users')
         for name, dob in results:
             print(name, dob)
 
-trio.run(main)
+anyio.run(main, backend="trio")
+# OR:
+# anyio.run(main, backend="asyncio")
 ```
 
 A `Connection` object can be used to execute queries, or create
 transactions, cursors or prepared statements. One `Connection` object
-can only be used from a single Trio task. If you have multiple tasks,
+can only be used from a single task. If you have multiple tasks,
 you can use a `Pool` object.
 
 ```python3
-import trio
-import pgtrio
+import anyio
+import pganyio
 
 async def insert_rows(pool, start, end):
     async with pool.acquire() as conn:
@@ -50,16 +52,18 @@ async def insert_rows(pool, start, end):
             results = await conn.execute('insert into numbers (n) values ($1)', i)
 
 async def main():
-    async with pgtrio.create_pool('test') as pool:
-        async with trio.open_nursery() as nursery:
+    async with pganyio.create_pool('test') as pool:
+        async with anyio.create_task_group() as nursery:
             nursery.start_soon(insert_rows, pool, 0, 10)
             nursery.start_soon(insert_rows, pool, 10, 20)
 
-trio.run(main)
+anyio.run(main, backend="trio")
+# OR:
+# anyio.run(main, backend="asyncio")
 ```
 
 As you can see, you can also use query parameters and pass your
-arguments to the `execute` method after the query. `pgtrio`
+arguments to the `execute` method after the query. `pganyio`
 automatically converts Python types to Postgres types. To see a list
 of supported types, see the relevant section further in this document.
 
@@ -69,16 +73,18 @@ In order to create a transaction, you can use the
 `Connection.transaction` method:
 
 ```python3
-import trio
-import pgtrio
+import anyio
+import pganyio
 
 async def main():
-    async with pgtrio.connect('test') as conn:
+    async with pganyio.connect('test') as conn:
         async with conn.transaction() as tr:
             await conn.execute("insert into users (name) values ('John Smith')")
             await conn.execute("insert into users (name) values ('Jane Smith')")
 
-trio.run(main)
+anyio.run(main, backend="trio")
+# OR:
+# anyio.run(main, backend="asyncio")
 ```
 
 The transaction will be committed automatically when execution reaches
@@ -93,11 +99,11 @@ If you need to execute a single query multiple times, perhaps with
 different arguments each time, you can use prepared statements.
 
 ```python3
-import trio
-import pgtrio
+import anyio
+import pganyio
 
 async def main():
-    async with pgtrio.connect('test') as conn:
+    async with pganyio.connect('test') as conn:
         stmt = await conn.prepare('insert into numbers (n) values ($1)')
         await stmt.execute(100)
         await stmt.execute(200)
@@ -105,27 +111,31 @@ async def main():
         numbers = await conn.execute('select n from numbers order by n')
         assert numbers == [(100,), (200,)]
 
-trio.run(main)
+anyio.run(main, backend="trio")
+# OR:
+# anyio.run(main, backend="asyncio")
 ```
 
 ### Cursors
 
-`pgtrio` also supports cursors for fetching large numbers of rows
+`pganyio` also supports cursors for fetching large numbers of rows
 without loading them all in memory.
 
 ```python3
-import trio
-import pgtrio
+import anyio
+import pganyio
 
 async def main():
-    async with pgtrio.connect('test') as conn:
+    async with pganyio.connect('test') as conn:
         async with conn.transaction():
             cur = await conn.cursor('select * from users')
             chunk1 = await cur.fetch(100)
             await cur.forward(50)
             chunk2 = await cur.fetch(100)
 
-trio.run(main)
+anyio.run(main, backend="trio")
+# OR:
+# anyio.run(main, backend="asyncio")
 ```
 
 Notice that a cursor must be used in a transaction block.
@@ -136,11 +146,11 @@ method skips the given number of rows.
 You can also obtain a cursor from a prepared statement.
 
 ```python3
-import trio
-import pgtrio
+import anyio
+import pganyio
 
 async def main():
-    async with pgtrio.connect('test') as conn:
+    async with pganyio.connect('test') as conn:
         async with conn.transaction():
             stmt = await conn.prepare('select * from users')
             cur = await stmt.cursor()
@@ -148,29 +158,33 @@ async def main():
             await cur.forward(50)
             chunk2 = await cur.fetch(100)
 
-trio.run(main)
+anyio.run(main, backend="trio")
+# OR:
+# anyio.run(main, backend="asyncio")
 ```
 
 Instead of using the `fetch` method you can also use iteration to read
 from a cursor:
 
 ```python3
-import trio
-import pgtrio
+import anyio
+import pganyio
 
 async def main():
-    async with pgtrio.connect('test') as conn:
+    async with pganyio.connect('test') as conn:
         async with conn.transaction():
             cur = await conn.cursor('select name, dob from users')
             async for name, dob in cur:
                 print(name, dob)
 
-trio.run(main)
+anyio.run(main, backend="trio")
+# OR:
+# anyio.run(main, backend="asyncio")
 ```
 
 ## Supported Types
 
-`pgtrio` can automatically convert between the following
+`pganyio` can automatically convert between the following
 python/postgres types:
 
 | postgres type | python type             |
@@ -205,5 +219,5 @@ Linux and need postgres executables at a well-known location
 (`/usr/lib/postgresql`).
 
 
-[1]: https://github.com/python-trio/trio
-
+[1]: https://github.com/agronholm/anyio
+[2]: https://github.com/python-trio/trio

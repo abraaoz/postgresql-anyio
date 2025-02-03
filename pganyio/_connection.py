@@ -1,55 +1,70 @@
 import logging
 import warnings
-import trio
-from enum import Enum
-from contextlib import asynccontextmanager
-from functools import wraps
 from collections import defaultdict
+from contextlib import asynccontextmanager
+from enum import Enum
+from functools import wraps
+from typing import Any, Callable
 from urllib.parse import urlparse
+
+import anyio
+import anyio.abc
+import anyio.streams
+import anyio.streams.memory
+
 from . import _pgmsg
 from ._codecs import CodecHelper
-from ._utils import (
-    PgProtocolFormat, get_exc_from_msg, set_event_when_done,
-    get_rowcount,
-)
-from ._transaction import Transaction
-from ._prepared_stmt import PreparedStatement
 from ._exceptions import (
-    InternalError, DatabaseError, OperationalError, ProgrammingError,
+    DatabaseError,
     InterfaceError,
+    InternalError,
+    OperationalError,
+    ProgrammingError,
+)
+from ._prepared_stmt import PreparedStatement
+from ._transaction import Transaction
+from ._utils import (
+    PgProtocolFormat,
+    get_exc_from_msg,
+    get_rowcount,
+    set_event_when_done,
 )
 
-DEFAULT_PG_UNIX_SOCKET = '/var/run/postgresql/.s.PGSQL.5432'
+DEFAULT_PG_UNIX_SOCKET = "/var/run/postgresql/.s.PGSQL.5432"
 BUFFER_SIZE = 204800
 
 logger = logging.getLogger(__name__)
 
 
 class QueryStatus(Enum):
-    INITIALIZING = 1    # still initializing and the first
-                        # ReadyForQuery message is yet to arrive
+    INITIALIZING = 1  # still initializing and the first
+    # ReadyForQuery message is yet to arrive
 
-    IDLE = 2            # connection is idle; we can send a query
+    IDLE = 2  # connection is idle; we can send a query
 
     IN_TRANSACTION = 3  # we're inside a transaction block
 
-    ERROR = 4           # current transaction has encountered an
-                        # error; we need to rollback to exit the
-                        # transaction
+    ERROR = 4  # current transaction has encountered an
+    # error; we need to rollback to exit the
+    # transaction
 
 
 class Connection:
-    def __init__(self, database, *,
-                 unix_socket_path=None,
-                 host=None,
-                 port=None,
-                 username=None,
-                 password=None,
-                 ssl=True,
-                 ssl_required=True,
-                 protocol_format=PgProtocolFormat._DEFAULT,
-                 codec_helper=None,
-                 tuple_class=None):
+    def __init__(
+        self,
+        database,
+        *,
+        unix_socket_path=None,
+        host=None,
+        port=None,
+        username=None,
+        password=None,
+        ssl=True,
+        ssl_required=True,
+        protocol_format=PgProtocolFormat._DEFAULT,
+        codec_helper=None,
+        tuple_class=None,
+    ):
         self.database = database
         self.unix_socket_path = unix_socket_path
         self.host = host
@@ -57,12 +72,13 @@ class Connection:
         self.username = username
         self.password = password
         self.ssl = ssl
+        self.ssl_required = ssl_required
         self.protocol_format = PgProtocolFormat.convert(protocol_format)
         self.tuple_class = tuple_class
 
         # this will be set when the _run method returns (the
         # set_event_when_done decorator takes care of that)
-        self.closed = trio.Event()
+        self.closed = anyio.Event()
 
         self.current_transaction = None
 
@@ -78,37 +94,38 @@ class Connection:
         self._query_row_count = None
         self._query_results = []
         self._statements_to_close = []
-        self._broken_handler = None
+        self._broken_handler: Callable[[Any], None] | None = None
 
-        self._owner = trio.lowlevel.current_task()
+        self._owner = anyio.get_current_task()
         if self._owner is None:
-            raise InterfaceError('Connection not created in a task')
+            raise InterfaceError("Connection not created in a task")
         self._disable_owner_check = False
 
         self._is_ready = False
-        self._is_ready_cv = trio.Condition()
+        self._is_ready_cv = anyio.Condition()
 
-        self._run_send_finished = trio.Event()
+        self._run_send_finished = anyio.Event()
 
         # these channels are used to communicate data to be sent to
         # the back-end to the _run_send task
-        self._outgoing_send_chan, self._outgoing_recv_chan = \
-            trio.open_memory_channel(0)
+        self._outgoing_send_chan, self._outgoing_recv_chan = (
+            anyio.create_memory_object_stream(0)
+        )
 
         # these channels are used to communicate incoming messages to
         # whoever is interested (used by _get_msg)
         self._incoming_send_chan, self._incoming_recv_chan = None, None
 
         # this is set when we receive AuthenticationOk from postgres
-        self._auth_ok = trio.Event()
+        self._auth_ok = anyio.Event()
 
         # this is set by the close() method to signal the connection
         # must be closed
-        self._start_closing = trio.Event()
+        self._start_closing = anyio.Event()
 
         # this is set when postgres type info is loaded from the
         # pg_catalog.pg_type table
-        self._pg_types_loaded = trio.Event()
+        self._pg_types_loaded = anyio.Event()
         if self._codec_helper.initialized:
             self._pg_types_loaded.set()
 
@@ -133,17 +150,18 @@ class Connection:
 
     async def execute(self, query, *params, tuple_class=None):
         if self._start_closing.is_set() or self.closed.is_set():
-            raise ProgrammingError('Connection is closed.')
+            raise ProgrammingError("Connection is closed.")
 
         if not self._pg_types_loaded.is_set():
             # the "if" is not technically necessary, but avoids an
             # extra trio checkpoint.
             await self._pg_types_loaded.wait()
 
-        if not self._disable_owner_check and \
-           trio.lowlevel.current_task() is not self._owner:
-            raise InterfaceError(
-                'Calling task is not owner of the connection')
+        if (
+            not self._disable_owner_check
+            and anyio.get_current_task() is not self._owner
+        ):
+            raise InterfaceError("Calling task is not owner of the connection")
 
         tuple_class = tuple_class or self.tuple_class
         stmt = await self.prepare(query, tuple_class=tuple_class)
@@ -160,12 +178,13 @@ class Connection:
     def close(self):
         self._start_closing.set()
 
-    def transaction(self, isolation_level=None, read_write_mode=None,
-                    deferrable=False):
-        return Transaction(self,
-                           isolation_level=isolation_level,
-                           read_write_mode=read_write_mode,
-                           deferrable=deferrable)
+    def transaction(self, isolation_level=None, read_write_mode=None, deferrable=False):
+        return Transaction(
+            self,
+            isolation_level=isolation_level,
+            read_write_mode=read_write_mode,
+            deferrable=deferrable,
+        )
 
     async def cursor(self, query, *params, **kwargs):
         stmt = await self.prepare(query)
@@ -176,16 +195,18 @@ class Connection:
         await stmt._init()
         return stmt
 
-    async def _execute_simple(self, query,
-                              dont_decode_values=False,
-                              protocol_format=None,
-                              no_close_pending=False):
+    async def _execute_simple(
+        self,
+        query,
+        dont_decode_values=False,
+        protocol_format=None,
+        no_close_pending=False,
+    ):
         # even though the null character is valid UTF-8, we can't use
         # it in queries, because at the protocol level, the queries
         # are sent as zero-terminated strings.
-        if '\x00' in query:
-            raise ProgrammingError(
-                'NULL character is not valid in PostgreSQL queries.')
+        if "\x00" in query:
+            raise ProgrammingError("NULL character is not valid in PostgreSQL queries.")
 
         async with self._is_ready_cv:
             while not self._is_ready:
@@ -198,7 +219,8 @@ class Connection:
             results = await self._process_simple_query(
                 query,
                 dont_decode_values=dont_decode_values,
-                protocol_format=protocol_format)
+                protocol_format=protocol_format,
+            )
         finally:
             await self._wait_for_ready(ignore_unknown=True)
 
@@ -207,11 +229,14 @@ class Connection:
 
         return results
 
-    @set_event_when_done('closed')
+    @set_event_when_done("closed")
     async def _run(self):
         await self._connect()
 
-        async with trio.open_nursery() as nursery, self._stream:
+        if not self._stream:
+            raise Exception("Stream not available.")
+
+        async with anyio.create_task_group() as nursery, self._stream:
             self._nursery = nursery
 
             nursery.start_soon(self._run_recv)
@@ -240,8 +265,9 @@ class Connection:
             # send task is now canceled.
             msg = _pgmsg.Terminate()
             try:
-                await self._stream.send_all(bytes(msg))
-            except trio.BrokenResourceError:
+                if self._stream:
+                    await self._stream.send(bytes(msg))
+            except anyio.BrokenResourceError:
                 pass
 
             nursery.cancel_scope.cancel()
@@ -251,23 +277,26 @@ class Connection:
             async for msg in self._outgoing_recv_chan:
                 if msg is None:
                     break
-                await self._stream.send_all(bytes(msg))
-        except trio.BrokenResourceError:
+                if self._stream:
+                    await self._stream.send(bytes(msg))
+        except anyio.BrokenResourceError:
             self._raise_broken_conn()
         finally:
             self._run_send_finished.set()
 
     async def _run_recv(self):
-        buf = b''
+        buf = b""
+        data = b""
         while True:
             try:
-                data = await self._stream.receive_some(BUFFER_SIZE)
-            except trio.BrokenResourceError:
+                if self._stream:
+                    data = await self._stream.receive(BUFFER_SIZE)
+            except anyio.BrokenResourceError:
                 self._raise_broken_conn()
-            except trio.ClosedResourceError:
+            except anyio.ClosedResourceError:
                 break
 
-            if data == b'':
+            if data == b"":
                 self._raise_broken_conn()
             buf += data
 
@@ -276,7 +305,7 @@ class Connection:
                 msg, length = _pgmsg.PgMessage.deserialize(buf, start)
                 if msg is None:
                     break
-                logger.debug('Received PG message: {msg}')
+                logger.debug("Received PG message: {msg}")
 
                 if self._incoming_send_chan:
                     await self._incoming_send_chan.send(msg)
@@ -293,25 +322,20 @@ class Connection:
     async def _wait_for_ready(self, ignore_unknown=False):
         if not self._is_ready:
             try:
-                msg = await self._get_msg(_pgmsg.ReadyForQuery,
-                                          ignore_unknown=ignore_unknown)
+                msg = await self._get_msg(
+                    _pgmsg.ReadyForQuery, ignore_unknown=ignore_unknown
+                )
                 await self._handle_msg_ready_for_query(msg)
                 self._is_ready = True
             except BaseException as e:
                 if isinstance(e, Exception):
-                    logger.error(
-                        f'Cannot salvage connection. Will close. Error: '
-                        f'{e}')
-                else: # BaseException. could be Cancelled.
-                    logger.debug(
-                        f'Cannot salvage connection. Will close. Error: '
-                        f'{e}')
+                    logger.error(f"Cannot salvage connection. Will close. Error: {e}")
+                else:  # BaseException. could be Cancelled.
+                    logger.debug(f"Cannot salvage connection. Will close. Error: {e}")
                 self.close()
                 raise
 
-    async def _process_simple_query(self, query,
-                                    dont_decode_values,
-                                    protocol_format):
+    async def _process_simple_query(self, query, dont_decode_values, protocol_format):
         msg = _pgmsg.Query(query)
         await self._send_msg(msg)
 
@@ -323,18 +347,16 @@ class Connection:
                 _pgmsg.CommandComplete,
                 _pgmsg.DataRow,
                 _pgmsg.RowDescription,
-                _pgmsg.EmptyQueryResponse)
+                _pgmsg.EmptyQueryResponse,
+            )
             if isinstance(msg, _pgmsg.ErrorResponse):
                 raise get_exc_from_msg(
                     msg,
-                    desc_prefix=(
-                        f'Error executing query: {query}\n   '
-                    ),
+                    desc_prefix=(f"Error executing query: {query}\n   "),
                 )
             elif isinstance(msg, _pgmsg.DataRow):
                 if not dont_decode_values:
-                    row = self._codec_helper.decode_row(
-                        msg.columns, row_desc)
+                    row = self._codec_helper.decode_row(msg.columns, row_desc)
                     results.append(row)
                 else:
                     results.append(msg.columns)
@@ -353,8 +375,7 @@ class Connection:
 
     async def _get_msg(self, *msg_types, ignore_unknown=False):
         if self._incoming_recv_chan is None:
-            raise InternalError(
-                '_get_msg called before ReadyForRequest was received')
+            raise InternalError("_get_msg called before ReadyForRequest was received")
 
         async for msg in self._incoming_recv_chan:
             if type(msg) in msg_types:
@@ -377,7 +398,7 @@ class Connection:
             # ready anymore until we get a ReadyForQuery message
             self._is_ready = False
 
-        data = b''.join(bytes(msg) for msg in msgs)
+        data = b"".join(bytes(msg) for msg in msgs)
         await self._outgoing_send_chan.send(data)
 
     async def _handle_unsolicited_msg(self, msg):
@@ -396,20 +417,17 @@ class Connection:
             _pgmsg.ReadyForQuery: self._handle_msg_ready_for_query,
         }.get(type(msg))
         if not handler:
-            raise InternalError(
-                f'Unexpected unsolicited message type: {msg}')
+            raise InternalError(f"Unexpected unsolicited message type: {msg}")
         await handler(msg)
 
     async def _handle_pre_auth_msg(self, msg):
         if isinstance(msg, _pgmsg.AuthenticationOk):
             self._auth_ok.set()
-            logger.info('Authentication okay.')
+            logger.info("Authentication okay.")
             return
 
         if isinstance(msg, _pgmsg.AuthenticationMD5Password):
-            logger.info(
-                'Received request for MD5 password. Sending '
-                'password...')
+            logger.info("Received request for MD5 password. Sending password...")
             msg = _pgmsg.PasswordMessage(
                 self.password,
                 md5=True,
@@ -419,10 +437,10 @@ class Connection:
             await self._send_msg(msg)
             return
         elif isinstance(msg, _pgmsg.Authentication):
-            auth_method = type(msg).__name__[len('Authentication'):]
+            auth_method = type(msg).__name__[len("Authentication") :]
             raise InterfaceError(
-                f'Unsupported authentication method requested by '
-                f'server: {auth_method}')
+                f"Unsupported authentication method requested by server: {auth_method}"
+            )
 
     async def _handle_error(self, msg):
         raise get_exc_from_msg(msg)
@@ -430,16 +448,16 @@ class Connection:
     async def _handle_notice(self, msg):
         fields = dict(msg.pairs)
 
-        notice_msg = fields.get('M')
+        notice_msg = fields.get("M")
         if notice_msg is not None:
             notice_msg = str(notice_msg)
 
-        severity = fields.get('S')
+        severity = fields.get("S")
         if severity is not None:
             severity = str(severity)
 
         self.notices.append((severity, notice_msg))
-        log_msg = f'Received notice from backend: [{severity}] {notice_msg}'
+        log_msg = f"Received notice from backend: [{severity}] {notice_msg}"
         logger.info(log_msg)
         warnings.warn(log_msg)
 
@@ -447,27 +465,28 @@ class Connection:
         self._backend_pid = msg.pid
         self._backend_secret_key = msg.secret_key
         logger.debug(
-            f'Received backend key data: pid={msg.pid} '
-            f'secret_key={msg.secret_key}')
+            f"Received backend key data: pid={msg.pid} secret_key={msg.secret_key}"
+        )
 
     async def _handle_msg_parameter_status(self, msg):
         self._server_vars[msg.param_name] = msg.param_value
 
     async def _handle_msg_ready_for_query(self, msg):
-        logger.debug('Backend is ready for query.')
+        logger.debug("Backend is ready for query.")
         self._query_status = {
-            b'I': QueryStatus.IDLE,
-            b'T': QueryStatus.IN_TRANSACTION,
-            b'E': QueryStatus.ERROR,
+            b"I": QueryStatus.IDLE,
+            b"T": QueryStatus.IN_TRANSACTION,
+            b"E": QueryStatus.ERROR,
         }.get(msg.status)
         if self._query_status is None:
             raise InternalError(
-                'Unknown status value in ReadyForQuery message: '
-                f'{msg.status}')
+                f"Unknown status value in ReadyForQuery message: {msg.status}"
+            )
 
         if not self._incoming_send_chan:
-            self._incoming_send_chan, self._incoming_recv_chan = \
-                trio.open_memory_channel(0)
+            self._incoming_send_chan, self._incoming_recv_chan = (
+                anyio.create_memory_object_stream(0)
+            )
 
         self._is_ready = True
         async with self._is_ready_cv:
@@ -479,63 +498,50 @@ class Connection:
     async def _connect(self):
         if self.username is None:
             import getpass
+
             self.username = getpass.getuser()
 
         if self.password is None:
-            self.password = ''
+            self.password = ""
 
         try:
             if self.unix_socket_path:
-                self._stream = await trio.open_unix_socket(
-                    self.unix_socket_path)
+                self._stream = await anyio.connect_unix(self.unix_socket_path)
             elif self.host:
                 if not self.port:
                     self.port = 5432
-                self._stream = await trio.open_tcp_stream(self.host, self.port)
 
                 if self.ssl:
-                    await self._setup_ssl()
+                    import ssl
+
+                    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_NONE
+                    self._stream = await anyio.connect_tcp(
+                        self.host, self.port, ssl_context=ssl_context
+                    )
+                else:
+                    self._stream = await anyio.connect_tcp(self.host, self.port)
             else:
                 # try connecting to a default unix socket and then to
                 # a default tcp port on localhost
                 try:
                     self.unix_socket_path = DEFAULT_PG_UNIX_SOCKET
-                    self._stream = await trio.open_unix_socket(
-                        self.unix_socket_path)
+                    self._stream = await anyio.connect_unix(self.unix_socket_path)
                 except (OSError, RuntimeError):
-                    self.host = 'localhost'
+                    self.host = "localhost"
                     if not self.port:
                         self.port = 5432
-                    self._stream = await trio.open_tcp_stream(
-                        self.host, self.port)
-        except (trio.socket.gaierror, OSError) as e:
+                    self._stream = await anyio.connect_tcp(self.host, self.port)
+        except OSError as e:
             self._raise_broken_conn(str(e))
-
-    async def _setup_ssl(self):
-        await self._stream.send_all(bytes(_pgmsg.SSLRequest()))
-        resp = await self._stream.receive_some(1)
-        if resp == b'':
-            self._raise_broken_conn()
-        if resp == b'N':
-            if self.ssl_required:
-                raise OperationalError(
-                    'Database server refused SSL request')
-            return
-        if resp != b'S':
-            raise InternalError(
-                'Received unexpected response to SSL request')
-
-        import ssl
-        self._stream = trio.SSLStream(
-            self._stream,
-            ssl.create_default_context()
-        )
 
     async def _load_pg_types(self):
         results = await self._execute_simple(
-            'select typname, oid, typarray from pg_catalog.pg_type',
+            "select typname, oid, typarray from pg_catalog.pg_type",
             dont_decode_values=True,
-            protocol_format=PgProtocolFormat.TEXT)
+            protocol_format=PgProtocolFormat.TEXT,
+        )
         self._codec_helper.init(results)
         self._pg_types_loaded.set()
 
@@ -549,7 +555,8 @@ class Connection:
         for stmt_name in self._statements_to_close:
             try:
                 await self._execute_simple(
-                    f'deallocate {stmt_name}', no_close_pending=True)
+                    f"deallocate {stmt_name}", no_close_pending=True
+                )
             except DatabaseError:
                 # the statement might not exist anymore
                 pass
@@ -557,11 +564,11 @@ class Connection:
     def _get_unique_id(self, id_type):
         self._id_counters[id_type] += 1
         idx = self._id_counters[id_type]
-        return f'_pgtrio_{id_type}_{idx}'
+        return f"_pganyio_{id_type}_{idx}"
 
     def _raise_broken_conn(self, msg=None):
         if not msg:
-            msg = 'Database connection broken'
+            msg = "Database connection broken"
 
         if self._broken_handler:
             self._broken_handler(self)
@@ -573,22 +580,22 @@ class Connection:
 @asynccontextmanager
 @wraps(Connection)
 async def connect(database, *args, **kwargs):
-    if '://' in database:
+    if "://" in database:
         url = urlparse(database)
-        if url.scheme != 'postgresql':
+        if url.scheme != "postgresql":
             raise ValueError('Database URL scheme should be "postgresql"')
         if not url.path:
-            raise ValueError('No database name in database URL')
-        assert url.path.startswith('/')
+            raise ValueError("No database name in database URL")
+        assert url.path.startswith("/")
         database = url.path[1:]
 
-        kwargs['host'] = url.hostname
-        kwargs['port'] = url.port
-        kwargs['username'] = url.username
-        kwargs['password'] = url.password
+        kwargs["host"] = url.hostname
+        kwargs["port"] = url.port
+        kwargs["username"] = url.username
+        kwargs["password"] = url.password
 
     conn = Connection(database, *args, **kwargs)
-    async with trio.open_nursery() as nursery:
+    async with anyio.create_task_group() as nursery:
         nursery.start_soon(conn._run)
 
         async with conn._is_ready_cv:

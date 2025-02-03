@@ -1,32 +1,31 @@
 from setuptools import setup
 
-
-with open('pgtrio/_version.py') as f:
+with open("pganyio/_version.py") as f:
     exec(f.read())
 
 test_dependencies = [
-    'pytest==7.1.1',
-    'pytest-trio==0.7.0',
-    'coverage==6.3.2',
-    'coverage-badge==1.1.0',
+    "pytest==7.1.1",
+    "pytest-trio==0.7.0",
+    "coverage==6.3.2",
+    "coverage-badge==1.1.0",
 ]
 
 dev_dependencies = test_dependencies + [
-    'wheel',
-    'twine==4.0.0',
+    "wheel",
+    "twine==4.0.0",
 ]
 
 setup(
-    name='pgtrio',
+    name="pganyio",
     version=__version__,
-    description='A Trio-Native PostgreSQL Interface Library',
-    long_description=open('README.md').read(),
-    long_description_content_type='text/markdown',
-    url='http://github.com/elektito/pgtrio',
-    author='Mostafa Razavi',
-    author_email='mostafa@sepent.com',
-    license='MIT',
-    packages=['pgtrio'],
+    description="An AnyIO (asyncio or trio backend) PostgreSQL client library",
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
+    url="http://github.com/elektito/pganyio",
+    author="Mostafa Razavi",
+    author_email="mostafa@sepent.com",
+    license="MIT",
+    packages=["pganyio"],
     zip_safe=False,
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -34,13 +33,13 @@ setup(
         "Operating System :: OS Independent",
     ],
     install_requires=[
-        'trio==0.20.0',
-        'python-dateutil==2.8.2',
-        'orjson==3.6.8',
-        'parsimonious==0.9.0',
+        "anyio==4.8.0",
+        "python-dateutil==2.9.0",
+        "orjson==3.6.8",
+        "parsimonious==0.9.0",
     ],
     extras_require={
-        'test': test_dependencies,
-        'dev': dev_dependencies,
+        "test": test_dependencies,
+        "dev": dev_dependencies,
     },
 )
