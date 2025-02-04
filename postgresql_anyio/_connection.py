@@ -184,7 +184,7 @@ class Connection:
     stmt = await self.prepare(query)
     return await stmt.cursor(*params, **kwargs)
 
-  async def prepare(self, query, **kwargs):
+  async def prepare(self, query, **kwargs) -> PreparedStatement:
     stmt = PreparedStatement(self, query, **kwargs)
     await stmt._init()
     return stmt
