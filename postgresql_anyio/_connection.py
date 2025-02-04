@@ -538,11 +538,11 @@ class Connection:
         f"""
           DO $$
           BEGIN
-              BEGIN
-                  DEALLOCATE {stmt_name};
-              EXCEPTION WHEN undefined_prepared_statement THEN
-                  -- the statement might not exist anymore
-              END;
+            DEALLOCATE {stmt_name};
+          EXCEPTION
+            WHEN invalid_sql_statement_name THEN
+              -- the statement might not exist anymore
+              NULL;
           END $$;
         """,
         no_close_pending=True,
