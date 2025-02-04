@@ -13,6 +13,7 @@ from ._exceptions import (
   Warning,
 )
 from ._pool import Pool, create_pool
+from ._prepared_stmt import PreparedStatement
 from ._utils import PgIsolationLevel, PgProtocolFormat, PgReadWriteMode
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
   "Warning",
   "Pool",
   "create_pool",
+  "PreparedStatement",
   "PgIsolationLevel",
   "PgProtocolFormat",
   "PgReadWriteMode",
