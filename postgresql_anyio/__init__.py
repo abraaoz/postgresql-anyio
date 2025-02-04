@@ -12,7 +12,7 @@ from ._exceptions import (
   ProgrammingError,
   Warning,
 )
-from ._pool import create_pool
+from ._pool import Pool, create_pool
 from ._utils import PgIsolationLevel, PgProtocolFormat, PgReadWriteMode
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
   "OperationalError",
   "ProgrammingError",
   "Warning",
+  "Pool",
   "create_pool",
   "PgIsolationLevel",
   "PgProtocolFormat",
