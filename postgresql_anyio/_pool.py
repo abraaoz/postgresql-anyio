@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from functools import wraps
+from typing import cast
 
 import anyio
 
@@ -61,7 +62,7 @@ class Pool:
 
       conn._owner = anyio.get_current_task()
       try:
-        yield conn
+        yield cast(Connection, conn)
       finally:
         self._in_use_conns.remove(conn)
         self._free_conns.append(conn)
