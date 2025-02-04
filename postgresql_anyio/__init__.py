@@ -1,5 +1,5 @@
 from ._codecs import Codec
-from ._connection import connect
+from ._connection import Connection, connect
 from ._exceptions import (
   DatabaseError,
   DataError,
@@ -17,6 +17,7 @@ from ._utils import PgIsolationLevel, PgProtocolFormat, PgReadWriteMode
 
 __all__ = [
   "Codec",
+  "Connection",
   "connect",
   "DatabaseError",
   "DataError",
