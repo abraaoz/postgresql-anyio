@@ -15,7 +15,6 @@ import anyio.streams.memory
 from . import _pgmsg
 from ._codecs import CodecHelper
 from ._exceptions import (
-  DatabaseError,
   InterfaceError,
   InternalError,
   OperationalError,
@@ -535,11 +534,19 @@ class Connection:
       return
 
     for stmt_name in self._statements_to_close:
-      try:
-        await self._execute_simple(f"deallocate {stmt_name}", no_close_pending=True)
-      except DatabaseError:
-        # the statement might not exist anymore
-        pass
+      await self._execute_simple(
+        f"""
+          DO $$
+          BEGIN
+              BEGIN
+                  DEALLOCATE {stmt_name};
+              EXCEPTION WHEN undefined_prepared_statement THEN
+                  -- the statement might not exist anymore
+              END;
+          END $$;
+        """,
+        no_close_pending=True,
+      )
 
   def _get_unique_id(self, id_type):
     self._id_counters[id_type] += 1
